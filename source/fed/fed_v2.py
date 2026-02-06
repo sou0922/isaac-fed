@@ -36,13 +36,21 @@ print(f"JetBot USD path: {JETBOT_USD}")
 
 async def main():
     # =================================================
-    # World初期化
+    # 現在のステージ上にWorldを初期化
     # =================================================
-    print("Initializing World...")
-    World.clear_instance()
+    print("Initializing World on current stage...")
 
+    # 既存のJetBotプリムを削除（再実行時の衝突を回避）
+    stage = omni.usd.get_context().get_stage()
+    if stage:
+        for i in range(NUM_ROBOTS):
+            prim_path = f"/World/JetBot_{i:02d}"
+            prim = stage.GetPrimAtPath(prim_path)
+            if prim and prim.IsValid():
+                stage.RemovePrim(prim_path)
+
+    World.clear_instance()
     world = World(stage_units_in_meters=1.0)
-    # 物理コンテキストを確実に初期化
     await world.initialize_simulation_context_async()
     world.scene.add_default_ground_plane()
 
