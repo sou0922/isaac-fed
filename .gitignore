@@ -172,3 +172,4 @@ generated_rsync_package.sh
 .container_venv/
 
 source/fed/robot_images
+target.usd
