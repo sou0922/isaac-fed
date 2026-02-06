@@ -170,3 +170,10 @@ source/standalone_examples/testing/external_workflow_tests/**
 exclude_list.txt
 generated_rsync_package.sh
 .container_venv/
+
+target.usd
+*.mp4
+
+# robot_images
+source/fed/robot_images/*
+!source/fed/robot_images/.gitkeep

@@ -241,3 +241,10 @@ To cite Isaac Sim, click on "Cite this repository" in the right sidebar of the [
 
 We do not support direct community contributions at the moment.
 
+## Federated Learning with Isaac Sim
+1. Enable isaacsim.replicator.agent.core and isaacsim.replicator.agent.ui extensions
+2. Open Actor SDG Window from Tools
+3. Set the config file path to people.yaml
+4. Open Script Editor
+5. Copy and Paste isaac-fed.py
+6. Run!

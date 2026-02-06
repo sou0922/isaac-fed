@@ -1,0 +1,20 @@
+isaacsim.replicator.agent:
+  version: 0.7.0
+  global:
+    seed: 123456789
+    simulation_length: 1800
+  scene:
+    asset_path: ""
+  character:
+    asset_path:
+    command_file: people_walking.txt
+    num: 4
+  replicator:
+    writer: None
+    parameters:
+      object_info_bounding_box_2d_tight: false
+      object_info_bounding_box_2d_loose: false
+      object_info_bounding_box_3d: false
+      agent_info_skeleton_data: false
+      semantic_filter_predicate: class:character
+      rgb: true
