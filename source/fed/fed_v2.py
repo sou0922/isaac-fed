@@ -17,8 +17,8 @@ import carb
 # =====================================================
 # 設定
 # =====================================================
-NUM_ROBOTS = 5
-RUN_TIME = 20.0
+NUM_ROBOTS = 4
+RUN_TIME = 30.0
 CAPTURE_INTERVAL = 2.0
 FORWARD_SPEED = 6.0          # m/s (スケールに合わせて調整)
 ANGULAR_SPEED = 0.0          # rad/s（直進のみ）
@@ -26,7 +26,17 @@ ANGULAR_SPEED = 0.0          # rad/s（直進のみ）
 # JetBot スケーリング設定
 # 元のJetBot横幅は約0.125m、2.5mにするためスケール20倍
 SCALE_FACTOR = 20.0
-SPACING = 60.0  # ロボット間の間隔（スケールに合わせて拡大）
+
+# 各ロボットの初期配置
+# JetBotは地面と平行でなければまっすぐ進まないため、yaw（Z軸回転）のみ指定
+# +X方向に進む: yaw = 0
+# -X方向に進む: yaw = 180度 (π rad)
+ROBOT_CONFIGS = [
+    {"position": (-250.0, -8.0, 0.0), "yaw_deg": 0.0, "turn_at_x": 250.0, "direction": 1},     # 1台目: +X方向へ
+    {"position": (-250.0, -3.0, 0.0), "yaw_deg": 0.0, "turn_at_x": 250.0, "direction": 1},     # 2台目: +X方向へ
+    {"position": (250.0, 8.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -250.0, "direction": -1},  # 3台目: -X方向へ
+    {"position": (250.0, 3.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -250.0, "direction": -1},  # 4台目: -X方向へ
+]
 
 BASE_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed/robot_images"
 VIDEO_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed"
@@ -73,11 +83,15 @@ async def main():
     for i in range(NUM_ROBOTS):
         robot_id = f"jetbot_{i:02d}"
         robot_path = f"/World/JetBot_{i:02d}"
+        config = ROBOT_CONFIGS[i]
 
-        # スケールに合わせた初期高さ (0.05 * SCALE_FACTOR = 1.0m)
-        position = np.array([i * SPACING - 100, i * 10, 1.0])
-        yaw_deg = i * (360.0 / NUM_ROBOTS)
-        yaw_rad = np.deg2rad(yaw_deg)
+        # 位置設定（z座標に少しオフセットを追加して浮かせる）
+        pos = config["position"]
+        position = np.array([pos[0], pos[1], pos[2] + 1.0])  # 地面から少し浮かせる
+        
+        # 回転設定: yaw（Z軸回転）のみ
+        # JetBotが地面と平行になるように roll=0, pitch=0 に固定
+        yaw_rad = np.deg2rad(config["yaw_deg"])
         orientation = euler_angles_to_quat(np.array([0, 0, yaw_rad]))
 
         wheeled_robot = world.scene.add(
@@ -102,7 +116,12 @@ async def main():
             "camera": None,
             "save_dir": save_dir,
             "frame": 0,
+            "direction": config["direction"],  # 1 = 正方向(+x)、-1 = 逆方向(-x)
+            "turn_at_x": config["turn_at_x"],  # 折り返しX座標
+            "yaw_deg": config["yaw_deg"],  # 現在のyaw角度
         })
+        
+        print(f"[CREATED] {robot_id} at ({position[0]:.1f}, {position[1]:.1f}, {position[2]:.1f}), yaw={config['yaw_deg']:.0f}°")
 
     # =================================================
     # ロボットにスケール適用
@@ -160,8 +179,10 @@ async def main():
     # 上空カメラ初期化
     # =================================================
     print("Initializing top-down camera...")
-    # 真下を向くための回転（-90度 X軸回転）
-    topdown_orientation = euler_angles_to_quat(np.array([-np.pi/2, 0, 0]))
+    # 真下を向くための回転
+    # Isaac SimのCameraはデフォルトで+Y方向を向くため、
+    # +90度 X軸回転で-Z方向（下）を向く
+    topdown_orientation = euler_angles_to_quat(np.array([np.pi/2, 0, 0]))
     topdown_camera = Camera(
         prim_path=topdown_cam_path,
         resolution=(1920, 1080),
@@ -191,10 +212,12 @@ async def main():
     # =================================================
     # ジョイント情報確認
     # =================================================
-    print("Checking robot joints...")
+    print("Checking robot joints and initial orientation...")
     for r in robots:
         wr = r["wheeled_robot"]
+        pos, quat = wr.get_world_pose()
         print(f"[DEBUG] {r['id']} dof_names: {wr.dof_names}, num_dof: {wr.num_dof}")
+        print(f"        Initial pose: pos=({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}), quat=({quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f})")
 
     # =================================================
     # シミュレーションループ（async版）
@@ -218,9 +241,26 @@ async def main():
         if current_time < 1.0:
             continue
 
-        # ロボット制御（全ロボットを前進させる）
-        wheel_action = controller.forward(command=[FORWARD_SPEED, ANGULAR_SPEED])
+        # ロボット制御（各ロボットの位置をチェックして折り返し判定）
         for r in robots:
+            pos, rot = r["wheeled_robot"].get_world_pose()
+            current_x = pos[0]
+            
+            # 折り返し判定
+            if r["direction"] == 1 and current_x >= r["turn_at_x"]:
+                # +x方向に進んでいて、折り返しポイントに到達 → 180度回転
+                r["direction"] = -1
+                r["yaw_deg"] = 180.0
+                print(f"[TURN] {r['id']} reached x={current_x:.1f}, turning to -x direction (yaw=180°)")
+            elif r["direction"] == -1 and current_x <= r["turn_at_x"]:
+                # -x方向に進んでいて、折り返しポイントに到達 → 0度回転
+                r["direction"] = 1
+                r["yaw_deg"] = 0.0
+                print(f"[TURN] {r['id']} reached x={current_x:.1f}, turning to +x direction (yaw=0°)")
+            
+            # 方向に応じた速度を設定
+            speed = FORWARD_SPEED * r["direction"]
+            wheel_action = controller.forward(command=[speed, ANGULAR_SPEED])
             r["wheeled_robot"].apply_wheel_actions(wheel_action)
 
         # 上空カメラからフレームをキャプチャ（毎フレーム）
@@ -251,10 +291,10 @@ async def main():
                     f"frame_{r['frame']:04d}.png"
                 )
 
-                # 現在位置を取得
-                pos, _ = r["wheeled_robot"].get_world_pose()
+                # 現在位置と回転を取得
+                pos, quat = r["wheeled_robot"].get_world_pose()
 
-                print(f"[SAVED] {r['id']} frame_{r['frame']:04d} at ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
+                print(f"[SAVED] {r['id']} frame_{r['frame']:04d} at ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}), dir={r['direction']}, yaw={r['yaw_deg']:.0f}°")
 
                 Image.fromarray(img).save(filepath)
                 r["frame"] += 1
@@ -274,34 +314,47 @@ async def main():
         os.makedirs(VIDEO_SAVE_DIR, exist_ok=True)
         video_saved = False
         
-        # 方法1: OpenCV (cv2) を試す
+        # 方法1: OpenCV (cv2) でMP4形式を試す (H.264コーデック)
         try:
             import cv2
             video_path = os.path.join(VIDEO_SAVE_DIR, "simulation_topdown.mp4")
             h, w = video_frames[0].shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(video_path, fourcc, 30.0, (w, h))
-            for frame in video_frames:
-                # RGB -> BGR変換
-                out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-            out.release()
-            print(f"[VIDEO] Saved to {video_path} (using OpenCV)")
-            video_saved = True
+            # avc1またはH264コーデックを試す
+            for codec in ['avc1', 'H264', 'mp4v', 'XVID']:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                ext = '.mp4' if codec in ['avc1', 'H264', 'mp4v'] else '.avi'
+                video_path = os.path.join(VIDEO_SAVE_DIR, f"simulation_topdown{ext}")
+                out = cv2.VideoWriter(video_path, fourcc, 30.0, (w, h))
+                if out.isOpened():
+                    for frame in video_frames:
+                        out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    out.release()
+                    print(f"[VIDEO] Saved to {video_path} (using OpenCV {codec})")
+                    video_saved = True
+                    break
+                else:
+                    print(f"Codec {codec} not available, trying next...")
         except ImportError:
-            print("OpenCV not available, trying imageio...")
+            print("OpenCV not available...")
         except Exception as e:
             print(f"OpenCV failed: {e}")
         
-        # 方法2: imageio + ffmpeg
+        # 方法2: GIFとして保存（PILで可能）
         if not video_saved:
             try:
-                import imageio
-                video_path = os.path.join(VIDEO_SAVE_DIR, "simulation_topdown.mp4")
-                imageio.mimsave(video_path, video_frames, fps=30)
-                print(f"[VIDEO] Saved to {video_path} (using imageio)")
+                video_path = os.path.join(VIDEO_SAVE_DIR, "simulation_topdown.gif")
+                pil_frames = [Image.fromarray(f) for f in video_frames[::3]]  # 3フレームごと（GIFサイズ削減）
+                pil_frames[0].save(
+                    video_path,
+                    save_all=True,
+                    append_images=pil_frames[1:],
+                    duration=100,  # 100ms per frame
+                    loop=0
+                )
+                print(f"[VIDEO] Saved to {video_path} (as GIF, every 3rd frame)")
                 video_saved = True
             except Exception as e:
-                print(f"imageio MP4 failed: {e}")
+                print(f"GIF save failed: {e}")
         
         # 方法3: PNGシーケンスとして保存
         if not video_saved:
