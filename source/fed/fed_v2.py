@@ -7,7 +7,6 @@ import omni.kit.app
 
 from isaacsim.core.api import World
 from isaacsim.robot.wheeled_robots.robots import WheeledRobot
-from isaacsim.robot.wheeled_robots.controllers.differential_controller import DifferentialController
 from isaacsim.core.utils.rotations import euler_angles_to_quat
 from isaacsim.sensors.camera import Camera
 from isaacsim.storage.native import get_assets_root_path
@@ -18,14 +17,14 @@ import carb
 # 設定
 # =====================================================
 NUM_ROBOTS = 4
-RUN_TIME = 30.0
+RUN_TIME = 62.0              # ウォームアップ2秒 + 実行60秒
 CAPTURE_INTERVAL = 2.0
 FORWARD_SPEED = 6.0          # m/s (スケールに合わせて調整)
 ANGULAR_SPEED = 0.0          # rad/s（直進のみ）
 
 # JetBot スケーリング設定
 # 元のJetBot横幅は約0.125m、2.5mにするためスケール20倍
-SCALE_FACTOR = 20.0
+SCALE_FACTOR = 10.0
 
 # 各ロボットの初期配置
 # JetBotは地面と平行でなければまっすぐ進まないため、yaw（Z軸回転）のみ指定
@@ -85,9 +84,12 @@ async def main():
         robot_path = f"/World/JetBot_{i:02d}"
         config = ROBOT_CONFIGS[i]
 
-        # 位置設定（z座標に少しオフセットを追加して浮かせる）
+        # 位置設定
+        # JetBotの車輪半径は約0.03m、スケール後は 0.03 * SCALEになる
+        # 車輪が地面に接するように設定（z_offset = scaled wheel radius）
         pos = config["position"]
-        position = np.array([pos[0], pos[1], pos[2] + 1.0])  # 地面から少し浮かせる
+        z_offset = 0.03 * SCALE_FACTOR  # 車輪半径分だけ浮かせる（地面接地）
+        position = np.array([pos[0], pos[1], pos[2] + z_offset])
         
         # 回転設定: yaw（Z軸回転）のみ
         # JetBotが地面と平行になるように roll=0, pitch=0 に固定
@@ -179,35 +181,46 @@ async def main():
     # 上空カメラ初期化
     # =================================================
     print("Initializing top-down camera...")
-    # 真下を向くための回転
-    # Isaac SimのCameraはデフォルトで+Y方向を向くため、
-    # +90度 X軸回転で-Z方向（下）を向く
-    topdown_orientation = euler_angles_to_quat(np.array([np.pi/2, 0, 0]))
+    # カメラを作成（向きは後で設定）
     topdown_camera = Camera(
         prim_path=topdown_cam_path,
         resolution=(1920, 1080),
         frequency=30.0,
         translation=np.array([0.0, 0.0, 300.0]),
-        orientation=topdown_orientation,
     )
     topdown_camera.initialize()
+    
+    # SetLookAtを使って地面を向くようにカメラの向きを設定
+    cam_prim = stage.GetPrimAtPath(topdown_cam_path)
+    if cam_prim and cam_prim.IsValid():
+        eye = Gf.Vec3d(0.0, 0.0, 300.0)    # カメラ位置
+        target = Gf.Vec3d(0.0, 0.0, 0.0)   # 地面中心
+        up_axis = Gf.Vec3d(0.0, 1.0, 0.0)  # Y軸が上（画像の上方向）
+        look_at_matrix = Gf.Matrix4d().SetLookAt(eye, target, up_axis)
+        look_at_quatd = look_at_matrix.GetInverse().ExtractRotation().GetQuat()
+        
+        # XformOpを取得または作成してorientを設定
+        xformable = UsdGeom.Xformable(cam_prim)
+        orient_attr = cam_prim.GetAttribute("xformOp:orient")
+        if orient_attr:
+            # 属性の型を確認してGfQuatdを使用
+            orient_attr.Set(Gf.Quatd(look_at_quatd))
+        else:
+            # orient属性がない場合は追加
+            orient_op = xformable.AddOrientOp()
+            orient_op.Set(Gf.Quatd(look_at_quatd))
+        print(f"[CAMERA] Top-down camera looking at ground with SetLookAt")
     print(f"[CAMERA] Top-down camera initialized at {topdown_cam_path}")
 
     # 動画用フレームリスト
     video_frames = []
 
     # =================================================
-    # コントローラー作成（スケールに合わせたパラメータ）
+    # コントローラー作成（kinematic移動では使用しないがログ用に残す）
     # =================================================
-    # 元のwheel_radius=0.03, wheel_base=0.1125をスケール倍
     scaled_wheel_radius = 0.03 * SCALE_FACTOR
     scaled_wheel_base = 0.1125 * SCALE_FACTOR
-    controller = DifferentialController(
-        name="diff_controller",
-        wheel_radius=scaled_wheel_radius,
-        wheel_base=scaled_wheel_base,
-    )
-    print(f"Differential controller created (wheel_radius={scaled_wheel_radius:.2f}m, wheel_base={scaled_wheel_base:.2f}m)")
+    print(f"Robot parameters: wheel_radius={scaled_wheel_radius:.2f}m, wheel_base={scaled_wheel_base:.2f}m")
 
     # =================================================
     # ジョイント情報確認
@@ -220,12 +233,18 @@ async def main():
         print(f"        Initial pose: pos=({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}), quat=({quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f})")
 
     # =================================================
-    # シミュレーションループ（async版）
+    # シミュレーションループ（kinematic移動版）
     # =================================================
-    print("Starting simulation...")
+    print("Starting simulation (kinematic movement)...")
 
     frame_count = 0
     last_capture_time = 0.0
+    last_debug_time = 0.0
+    warmup_done = False
+    
+    # 移動速度 (m/frame) - フレームレートに依存
+    # 60fpsを想定、FORWARD_SPEED m/sなので、1フレームあたり FORWARD_SPEED/60 m
+    dt = 1.0 / 60.0  # フレーム間隔（約定）
 
     settings = carb.settings.get_settings()
     settings.set("/rtx/post/motionBlur/enabled", False)
@@ -237,31 +256,57 @@ async def main():
         current_time = world.current_time
         frame_count += 1
 
-        # ウォームアップ（最初の1秒）
-        if current_time < 1.0:
+        # ウォームアップ（最初の2秒はロボットを安定させる）
+        if current_time < 2.0:
             continue
+        
+        # ウォームアップ完了メッセージ（一度だけ）
+        if not warmup_done:
+            print("\n=== WARMUP COMPLETE ===")
+            print("Initial robot positions:")
+            for r in robots:
+                pos, quat = r["wheeled_robot"].get_world_pose()
+                print(f"  {r['id']}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
+            print("Starting kinematic robot movement...\n")
+            warmup_done = True
+            last_capture_time = current_time
 
-        # ロボット制御（各ロボットの位置をチェックして折り返し判定）
+        # デバッグ出力（1秒ごと）
+        if current_time - last_debug_time >= 1.0:
+            print(f"\n[DEBUG t={current_time:.1f}s]")
+            for r in robots:
+                pos, quat = r["wheeled_robot"].get_world_pose()
+                print(f"  {r['id']}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}), dir={r['direction']}, yaw={r['yaw_deg']:.0f}°")
+            last_debug_time = current_time
+
+        # ロボットのkinematic移動（物理を無視して位置を直接更新）
         for r in robots:
-            pos, rot = r["wheeled_robot"].get_world_pose()
+            pos, _ = r["wheeled_robot"].get_world_pose()
             current_x = pos[0]
+            current_y = pos[1]
+            current_z = pos[2]
             
             # 折り返し判定
             if r["direction"] == 1 and current_x >= r["turn_at_x"]:
-                # +x方向に進んでいて、折り返しポイントに到達 → 180度回転
                 r["direction"] = -1
                 r["yaw_deg"] = 180.0
-                print(f"[TURN] {r['id']} reached x={current_x:.1f}, turning to -x direction (yaw=180°)")
+                print(f"[TURN] {r['id']} reached x={current_x:.1f}, turning to -x direction")
             elif r["direction"] == -1 and current_x <= r["turn_at_x"]:
-                # -x方向に進んでいて、折り返しポイントに到達 → 0度回転
                 r["direction"] = 1
                 r["yaw_deg"] = 0.0
-                print(f"[TURN] {r['id']} reached x={current_x:.1f}, turning to +x direction (yaw=0°)")
+                print(f"[TURN] {r['id']} reached x={current_x:.1f}, turning to +x direction")
             
-            # 方向に応じた速度を設定
-            speed = FORWARD_SPEED * r["direction"]
-            wheel_action = controller.forward(command=[speed, ANGULAR_SPEED])
-            r["wheeled_robot"].apply_wheel_actions(wheel_action)
+            # 新しい位置を計算（X方向のみ移動、YとZは固定）
+            move_distance = FORWARD_SPEED * dt * r["direction"]
+            new_x = current_x + move_distance
+            new_position = np.array([new_x, current_y, current_z])
+            
+            # 向きを計算
+            target_yaw_rad = np.deg2rad(r["yaw_deg"])
+            target_orientation = euler_angles_to_quat(np.array([0, 0, target_yaw_rad]))
+            
+            # 位置と向きを直接設定（kinematic移動）
+            r["wheeled_robot"].set_world_pose(position=new_position, orientation=target_orientation)
 
         # 上空カメラからフレームをキャプチャ（毎フレーム）
         topdown_rgba = topdown_camera.get_rgba()
