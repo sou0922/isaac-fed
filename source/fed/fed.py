@@ -26,7 +26,7 @@ CAPTURE_INTERVAL = 2.0
 FORWARD_SPEED = 5.0
 SPACING = 3.0
 
-BASE_SAVE_DIR = os.path.expanduser("~/so/isaacsim_images")
+BASE_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed/robot_images"
 
 LEFT_WHEEL = "left_wheel_joint"
 RIGHT_WHEEL = "right_wheel_joint"
@@ -42,6 +42,13 @@ def find_articulation_root(stage, robot_root_path):
     if not root or not root.IsValid():
         return None
 
+    # JetBotの場合、chassis がArticulationRoot
+    chassis_path = f"{robot_root_path}/chassis"
+    chassis = stage.GetPrimAtPath(chassis_path)
+    if chassis and chassis.IsValid() and chassis.HasAPI(UsdPhysics.ArticulationRootAPI):
+        return chassis_path
+    
+    # フォールバック：全体を探索
     for prim in stage.Traverse():
         if not prim.GetPath().HasPrefix(root.GetPath()):
             continue
