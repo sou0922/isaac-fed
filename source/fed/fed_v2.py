@@ -11,6 +11,7 @@ from isaacsim.robot.wheeled_robots.controllers.differential_controller import Di
 from isaacsim.core.utils.rotations import euler_angles_to_quat
 from isaacsim.sensors.camera import Camera
 from isaacsim.storage.native import get_assets_root_path
+from pxr import UsdGeom, Gf
 import carb
 
 # =====================================================
@@ -19,11 +20,16 @@ import carb
 NUM_ROBOTS = 5
 RUN_TIME = 20.0
 CAPTURE_INTERVAL = 2.0
-FORWARD_SPEED = 0.3          # m/s
+FORWARD_SPEED = 6.0          # m/s (スケールに合わせて調整)
 ANGULAR_SPEED = 0.0          # rad/s（直進のみ）
-SPACING = 3.0
+
+# JetBot スケーリング設定
+# 元のJetBot横幅は約0.125m、2.5mにするためスケール20倍
+SCALE_FACTOR = 20.0
+SPACING = 60.0  # ロボット間の間隔（スケールに合わせて拡大）
 
 BASE_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed/robot_images"
+VIDEO_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed"
 
 # JetBot USDパス
 assets_root_path = get_assets_root_path()
@@ -40,7 +46,7 @@ async def main():
     # =================================================
     print("Initializing World on current stage...")
 
-    # 既存のJetBotプリムを削除（再実行時の衝突を回避）
+    # 既存のJetBotプリムと上空カメラを削除（再実行時の衝突を回避）
     stage = omni.usd.get_context().get_stage()
     if stage:
         for i in range(NUM_ROBOTS):
@@ -48,6 +54,10 @@ async def main():
             prim = stage.GetPrimAtPath(prim_path)
             if prim and prim.IsValid():
                 stage.RemovePrim(prim_path)
+        # 上空カメラも削除
+        topdown_prim = stage.GetPrimAtPath("/World/TopDownCamera")
+        if topdown_prim and topdown_prim.IsValid():
+            stage.RemovePrim("/World/TopDownCamera")
 
     World.clear_instance()
     world = World(stage_units_in_meters=1.0)
@@ -57,14 +67,15 @@ async def main():
     # =================================================
     # ロボット作成（WheeledRobot + create_robot=True）
     # =================================================
-    print("Creating robots...")
+    print(f"Creating robots with scale factor {SCALE_FACTOR}...")
     robots = []
 
     for i in range(NUM_ROBOTS):
         robot_id = f"jetbot_{i:02d}"
         robot_path = f"/World/JetBot_{i:02d}"
 
-        position = np.array([i * SPACING, i * 0.5, 0.05])
+        # スケールに合わせた初期高さ (0.05 * SCALE_FACTOR = 1.0m)
+        position = np.array([i * SPACING - 100, i * 10, 1.0])
         yaw_deg = i * (360.0 / NUM_ROBOTS)
         yaw_rad = np.deg2rad(yaw_deg)
         orientation = euler_angles_to_quat(np.array([0, 0, yaw_rad]))
@@ -93,9 +104,34 @@ async def main():
             "frame": 0,
         })
 
-        print(f"[CREATED] {robot_id} at ({position[0]:.2f}, {position[1]:.2f}, {position[2]:.2f}), yaw: {yaw_deg:.1f}°")
+    # =================================================
+    # ロボットにスケール適用
+    # =================================================
+    print("Applying scale to robots...")
+    stage = omni.usd.get_context().get_stage()
+    for r in robots:
+        prim = stage.GetPrimAtPath(r["path"])
+        if prim and prim.IsValid():
+            xformable = UsdGeom.Xformable(prim)
+            # 既存のスケールオペレーションを探す or 追加
+            scale_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeScale]
+            if scale_ops:
+                scale_ops[0].Set(Gf.Vec3f(SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR))
+            else:
+                xformable.AddScaleOp().Set(Gf.Vec3f(SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR))
+            print(f"[SCALE] {r['id']} scaled by {SCALE_FACTOR}x")
 
-    print(f"\n{NUM_ROBOTS} robots created.")
+    print(f"\n{NUM_ROBOTS} robots created and scaled.")
+
+    # =================================================
+    # 上空カメラ（ワールド中央上部から見下ろす）
+    # =================================================
+    print("Creating top-down camera at (0, 0, 300)...")
+    topdown_cam_path = "/World/TopDownCamera"
+    # 既存のカメラを削除
+    existing_cam = stage.GetPrimAtPath(topdown_cam_path)
+    if existing_cam and existing_cam.IsValid():
+        stage.RemovePrim(topdown_cam_path)
 
     # =================================================
     # World リセット（async版）
@@ -107,7 +143,7 @@ async def main():
     # =================================================
     # Camera初期化（world.reset()の後）
     # =================================================
-    print("Initializing cameras...")
+    print("Initializing robot cameras...")
     for r in robots:
         cam_path = f"{r['path']}/chassis/fed_camera"
         cam = Camera(
@@ -121,14 +157,36 @@ async def main():
         print(f"[CAMERA] {r['id']} initialized at {cam_path}")
 
     # =================================================
-    # コントローラー作成
+    # 上空カメラ初期化
     # =================================================
+    print("Initializing top-down camera...")
+    # 真下を向くための回転（-90度 X軸回転）
+    topdown_orientation = euler_angles_to_quat(np.array([-np.pi/2, 0, 0]))
+    topdown_camera = Camera(
+        prim_path=topdown_cam_path,
+        resolution=(1920, 1080),
+        frequency=30.0,
+        translation=np.array([0.0, 0.0, 300.0]),
+        orientation=topdown_orientation,
+    )
+    topdown_camera.initialize()
+    print(f"[CAMERA] Top-down camera initialized at {topdown_cam_path}")
+
+    # 動画用フレームリスト
+    video_frames = []
+
+    # =================================================
+    # コントローラー作成（スケールに合わせたパラメータ）
+    # =================================================
+    # 元のwheel_radius=0.03, wheel_base=0.1125をスケール倍
+    scaled_wheel_radius = 0.03 * SCALE_FACTOR
+    scaled_wheel_base = 0.1125 * SCALE_FACTOR
     controller = DifferentialController(
         name="diff_controller",
-        wheel_radius=0.03,
-        wheel_base=0.1125,
+        wheel_radius=scaled_wheel_radius,
+        wheel_base=scaled_wheel_base,
     )
-    print("Differential controller created.")
+    print(f"Differential controller created (wheel_radius={scaled_wheel_radius:.2f}m, wheel_base={scaled_wheel_base:.2f}m)")
 
     # =================================================
     # ジョイント情報確認
@@ -165,7 +223,15 @@ async def main():
         for r in robots:
             r["wheeled_robot"].apply_wheel_actions(wheel_action)
 
-        # 画像キャプチャ
+        # 上空カメラからフレームをキャプチャ（毎フレーム）
+        topdown_rgba = topdown_camera.get_rgba()
+        if topdown_rgba is not None and topdown_rgba.size > 0:
+            tw, th = topdown_camera.get_resolution()
+            topdown_rgba = topdown_rgba.reshape(th, tw, 4)
+            topdown_img = topdown_rgba[:, :, :3].astype(np.uint8)
+            video_frames.append(topdown_img)
+
+        # ロボットカメラからの画像キャプチャ
         if current_time - last_capture_time >= CAPTURE_INTERVAL:
             for r in robots:
                 cam = r["camera"]
@@ -199,6 +265,53 @@ async def main():
         if current_time > RUN_TIME:
             print("FINISHED")
             break
+
+    # =================================================
+    # 動画を保存
+    # =================================================
+    print(f"Saving video ({len(video_frames)} frames)...")
+    if video_frames:
+        os.makedirs(VIDEO_SAVE_DIR, exist_ok=True)
+        video_saved = False
+        
+        # 方法1: OpenCV (cv2) を試す
+        try:
+            import cv2
+            video_path = os.path.join(VIDEO_SAVE_DIR, "simulation_topdown.mp4")
+            h, w = video_frames[0].shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(video_path, fourcc, 30.0, (w, h))
+            for frame in video_frames:
+                # RGB -> BGR変換
+                out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            out.release()
+            print(f"[VIDEO] Saved to {video_path} (using OpenCV)")
+            video_saved = True
+        except ImportError:
+            print("OpenCV not available, trying imageio...")
+        except Exception as e:
+            print(f"OpenCV failed: {e}")
+        
+        # 方法2: imageio + ffmpeg
+        if not video_saved:
+            try:
+                import imageio
+                video_path = os.path.join(VIDEO_SAVE_DIR, "simulation_topdown.mp4")
+                imageio.mimsave(video_path, video_frames, fps=30)
+                print(f"[VIDEO] Saved to {video_path} (using imageio)")
+                video_saved = True
+            except Exception as e:
+                print(f"imageio MP4 failed: {e}")
+        
+        # 方法3: PNGシーケンスとして保存
+        if not video_saved:
+            print("Saving frames as PNG sequence...")
+            video_frames_dir = os.path.join(VIDEO_SAVE_DIR, "topdown_frames")
+            os.makedirs(video_frames_dir, exist_ok=True)
+            for i, frame in enumerate(video_frames):
+                Image.fromarray(frame).save(os.path.join(video_frames_dir, f"frame_{i:04d}.png"))
+            print(f"[FRAMES] Saved {len(video_frames)} frames to {video_frames_dir}")
+            print("To convert to video: ffmpeg -framerate 30 -i frame_%04d.png -c:v libx264 -pix_fmt yuv420p output.mp4")
 
     print("SCRIPT END")
     world.stop()

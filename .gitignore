@@ -173,3 +173,4 @@ generated_rsync_package.sh
 
 source/fed/robot_images
 target.usd
+*.mp4
