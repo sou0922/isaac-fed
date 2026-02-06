@@ -12,6 +12,8 @@ import carb.settings
 from pxr import UsdPhysics, Sdf
 
 from omni.isaac.core.utils.stage import add_reference_to_stage
+from omni.isaac.core.utils.rotations import euler_angles_to_quat
+from omni.isaac.core.utils.prims import get_prim_at_path
 from omni.isaac.sensor import Camera
 from omni.isaac.core.articulations import Articulation
 
@@ -63,6 +65,12 @@ settings.set("/rtx/post/motionBlur/enabled", False)
 settings.set("/rtx/taa/enabled", False)
 
 # =====================================================
+# Timeline & App
+# =====================================================
+timeline = get_timeline_interface()
+app = omni.kit.app.get_app()
+
+# =====================================================
 # JetBot & Camera
 # =====================================================
 robots = []
@@ -76,16 +84,31 @@ for i in range(NUM_ROBOTS):
             usd_path="/Isaac/Sim/Robots/NVIDIA/Jetbot/jetbot.usd",
             prim_path=robot_path
         )
+        
+        # ステージ更新を待つ
+        app.update()
 
     # 初期配置（位置と向きを変える）
     yaw = i * 0.3
-    xform = stage.GetPrimAtPath(robot_path)
-    UsdPhysics.RigidBodyAPI.Apply(xform)
+    xform = get_prim_at_path(robot_path)
+    
+    # プリムが新規作成された場合のみRigidBodyAPIを適用
+    if not xform.HasAPI(UsdPhysics.RigidBodyAPI):
+        UsdPhysics.RigidBodyAPI.Apply(xform)
 
-    xform.GetAttribute("xformOp:translate").Set((i * SPACING, i * 0.5, 0.0))
-    xform.GetAttribute("xformOp:orient").Set(
-        (math.cos(yaw / 2), 0, 0, math.sin(yaw / 2))
-    )
+    # Xformableを使って既存のopsを取得または作成
+    from pxr import UsdGeom, Gf
+    xformable = UsdGeom.Xformable(xform)
+    
+    # 既存のtransform opsをクリア
+    xformable.ClearXformOpOrder()
+    
+    # 新しいopsを追加
+    translate_op = xformable.AddTranslateOp()
+    orient_op = xformable.AddOrientOp()
+    
+    translate_op.Set(Gf.Vec3d(i * SPACING, i * 0.5, 0.0))
+    orient_op.Set(Gf.Quatf(math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)))
 
     # Camera（JetBotに親子付け）
     cam = Camera(
@@ -108,12 +131,6 @@ for i in range(NUM_ROBOTS):
         "save_dir": save_dir,
         "frame": 0
     })
-
-# =====================================================
-# Timeline
-# =====================================================
-timeline = get_timeline_interface()
-app = omni.kit.app.get_app()
 
 print("READY → PRESS ▶ PLAY")
 
