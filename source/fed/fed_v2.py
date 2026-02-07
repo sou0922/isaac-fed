@@ -37,7 +37,7 @@ for ext in ANIM_EXTENSIONS:
 # 設定
 # =====================================================
 NUM_ROBOTS = 4
-RUN_TIME = 100.0              # ウォームアップ2秒 + 実行（人が周回するため長め）
+RUN_TIME = 50.0              # ウォームアップ2秒 + 実行（人が周回するため長め）
 CAPTURE_INTERVAL = 2.0
 FORWARD_SPEED = 10.0          # m/s (スケールに合わせて調整)
 ANGULAR_SPEED = 0.0          # rad/s（直進のみ）
@@ -54,10 +54,10 @@ SCALE_FACTOR = 15.0
 # +X方向に進む: yaw = 0
 # -X方向に進む: yaw = 180度 (π rad)
 ROBOT_CONFIGS = [
-    {"position": (-250.0, -8.0, 0.0), "yaw_deg": 0.0, "turn_at_x": 250.0, "direction": 1},     # 1台目: +X方向へ
-    {"position": (-250.0, -3.0, 0.0), "yaw_deg": 0.0, "turn_at_x": 250.0, "direction": 1},     # 2台目: +X方向へ
-    {"position": (250.0, 8.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -250.0, "direction": -1},  # 3台目: -X方向へ
-    {"position": (250.0, 3.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -250.0, "direction": -1},  # 4台目: -X方向へ
+    {"position": (-50.0, -8.0, 0.0), "yaw_deg": 0.0, "turn_at_x": 50.0, "direction": 1},     # 1台目: +X方向へ
+    {"position": (-50.0, -3.0, 0.0), "yaw_deg": 0.0, "turn_at_x": 50.0, "direction": 1},     # 2台目: +X方向へ
+    {"position": (50.0, 8.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -50.0, "direction": -1},  # 3台目: -X方向へ
+    {"position": (50.0, 3.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -50.0, "direction": -1},  # 4台目: -X方向へ
 ]
 
 # 人の初期配置設定（4人）
@@ -115,9 +115,9 @@ print(f"JetBot USD path: {JETBOT_USD}")
 # 人のUSDパス (Isaac/People/Charactersから4種類)
 PERSON_USDS = [
     assets_root_path + "/Isaac/People/Characters/F_Business_02/F_Business_02.usd",
-    assets_root_path + "/Isaac/People/Characters/M_Business_01/M_Business_01.usd",
-    assets_root_path + "/Isaac/People/Characters/F_Casual_01/F_Casual_01.usd",
-    assets_root_path + "/Isaac/People/Characters/M_Casual_01/M_Casual_01.usd",
+    assets_root_path + "/Isaac/People/Characters/F_Business_02/F_Business_02.usd",
+    assets_root_path + "/Isaac/People/Characters/M_Medical_01/M_Medical_01.usd",
+    assets_root_path + "/Isaac/People/Characters/F_Medical_01/F_Medical_01.usd",
 ]
 for i, usd_path in enumerate(PERSON_USDS):
     print(f"Person_{i:02d} USD path: {usd_path}")
