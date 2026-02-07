@@ -5,33 +5,49 @@ import numpy as np
 from PIL import Image
 import omni.usd
 import omni.kit.app
+import omni.timeline
 
 from isaacsim.core.api import World
 from isaacsim.robot.wheeled_robots.robots import WheeledRobot
 from isaacsim.core.utils.rotations import euler_angles_to_quat
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.utils.semantics import add_update_semantics
+from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.sensors.camera import Camera
 from isaacsim.storage.native import get_assets_root_path
-from pxr import UsdGeom, Gf, Sdf
+from pxr import UsdGeom, Gf, Sdf, UsdSkel
 import carb
+
+# アニメーション関連の拡張機能を有効化
+ANIM_EXTENSIONS = [
+    "omni.anim.people",
+    "omni.anim.timeline",
+    "omni.anim.graph.bundle",
+    "omni.anim.graph.core",
+]
+print("Enabling animation extensions...")
+for ext in ANIM_EXTENSIONS:
+    try:
+        enable_extension(ext)
+        print(f"  [OK] {ext}")
+    except Exception as e:
+        print(f"  [SKIP] {ext}: {e}")
 
 # =====================================================
 # 設定
 # =====================================================
 NUM_ROBOTS = 4
-RUN_TIME = 122.0              # ウォームアップ2秒 + 実行120秒（人が周回するため長め）
+RUN_TIME = 100.0              # ウォームアップ2秒 + 実行（人が周回するため長め）
 CAPTURE_INTERVAL = 2.0
-FORWARD_SPEED = 6.0          # m/s (スケールに合わせて調整)
+FORWARD_SPEED = 10.0          # m/s (スケールに合わせて調整)
 ANGULAR_SPEED = 0.0          # rad/s（直進のみ）
 
 # 人の歩行設定
-PERSON_WALK_SPEED = 1.4      # m/s (通常の歩行速度)
 PERSON_WALK_DISTANCE = 40.0  # 各辺の歩行距離
 
 # JetBot スケーリング設定
 # 元のJetBot横幅は約0.125m、2.5mにするためスケール20倍
-SCALE_FACTOR = 10.0
+SCALE_FACTOR = 15.0
 
 # 各ロボットの初期配置
 # JetBotは地面と平行でなければまっすぐ進まないため、yaw（Z軸回転）のみ指定
@@ -44,14 +60,41 @@ ROBOT_CONFIGS = [
     {"position": (250.0, 3.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -250.0, "direction": -1},  # 4台目: -X方向へ
 ]
 
-# 人の初期配置設定
+# 人の初期配置設定（4人）
+# 全員同じルートを周回：(-20,20) → (-20,-20) → (20,-20) → (20,20) → (-20,20)...
+# 初期位置と初期方向を設定して、同じ40m四角形を右回りに周回
 PERSON_CONFIGS = [
     {
         "name": "Person_00",
-        "position": (-20.0, 20.0, 0.0),  # 初期位置 (x, y, z) - zは地面に接する
-        "yaw_deg": -90.0,  # -Y方向を向く (南向き)
-        "walk_direction": 0,  # 0: -Y方向, 1: -X方向, 2: +Y方向, 3: +X方向
-        "distance_walked": 0.0,  # 現在の辺での歩行距離
+        "position": (-20.0, 20.0, 0.0),
+        "yaw_deg": -90.0,      # -Y方向を向く (南向き)
+        "walk_direction": 0,   # 0: -Y方向から開始
+        "walk_speed": 2.2,     # m/s
+        "distance_walked": 0.0,
+    },
+    {
+        "name": "Person_01",
+        "position": (-20.0, -20.0, 0.0),
+        "yaw_deg": 0.0,        # +X方向を向く (東向き)
+        "walk_direction": 1,   # 1: +X方向から開始
+        "walk_speed": 2.4,     # m/s
+        "distance_walked": 0.0,
+    },
+    {
+        "name": "Person_02",
+        "position": (20.0, 20.0, 0.0),
+        "yaw_deg": 180.0,      # -X方向を向く (西向き)
+        "walk_direction": 3,   # 3: -X方向から開始
+        "walk_speed": 2.0,     # m/s
+        "distance_walked": 0.0,
+    },
+    {
+        "name": "Person_03",
+        "position": (20.0, -20.0, 0.0),
+        "yaw_deg": 90.0,       # +Y方向を向く (北向き)
+        "walk_direction": 2,   # 2: +Y方向から開始
+        "walk_speed": 2.6,     # m/s
+        "distance_walked": 0.0,
     },
 ]
 
@@ -69,19 +112,27 @@ if assets_root_path is None:
 JETBOT_USD = assets_root_path + "/Isaac/Robots/NVIDIA/Jetbot/jetbot.usd"
 print(f"JetBot USD path: {JETBOT_USD}")
 
-# 人のUSDパス (Isaac/People/Charactersから一つ選択)
-PERSON_USD = assets_root_path + "/Isaac/People/Characters/F_Business_02/F_Business_02.usd"
-print(f"Person USD path: {PERSON_USD}")
+# 人のUSDパス (Isaac/People/Charactersから4種類)
+PERSON_USDS = [
+    assets_root_path + "/Isaac/People/Characters/F_Business_02/F_Business_02.usd",
+    assets_root_path + "/Isaac/People/Characters/M_Business_01/M_Business_01.usd",
+    assets_root_path + "/Isaac/People/Characters/F_Casual_01/F_Casual_01.usd",
+    assets_root_path + "/Isaac/People/Characters/M_Casual_01/M_Casual_01.usd",
+]
+for i, usd_path in enumerate(PERSON_USDS):
+    print(f"Person_{i:02d} USD path: {usd_path}")
 
 
 def get_person_direction_vector(direction_index):
-    """歩行方向インデックスから方向ベクトルと向きを返す"""
-    # 0: -Y方向, 1: -X方向, 2: +Y方向, 3: +X方向
+    """歩行方向インデックスから方向ベクトルと向きを返す
+    右回り（時計回り）の順序: -Y → +X → +Y → -X → -Y...
+    """
+    # 0: -Y方向, 1: +X方向, 2: +Y方向, 3: -X方向 (右回り)
     directions = [
         (np.array([0.0, -1.0, 0.0]), -90.0),   # -Y方向、yaw=-90度
-        (np.array([-1.0, 0.0, 0.0]), 180.0),   # -X方向、yaw=180度
-        (np.array([0.0, 1.0, 0.0]), 90.0),     # +Y方向、yaw=90度
         (np.array([1.0, 0.0, 0.0]), 0.0),      # +X方向、yaw=0度
+        (np.array([0.0, 1.0, 0.0]), 90.0),     # +Y方向、yaw=90度
+        (np.array([-1.0, 0.0, 0.0]), 180.0),   # -X方向、yaw=180度
     ]
     return directions[direction_index % 4]
 
@@ -196,9 +247,10 @@ async def main():
         if existing_person and existing_person.IsValid():
             stage.RemovePrim(person_path)
         
-        # 人のキャラクターを追加
+        # 人のキャラクターを追加（各人に異なるUSDを使用）
+        person_usd = PERSON_USDS[i % len(PERSON_USDS)]
         person_prim = add_reference_to_stage(
-            usd_path=PERSON_USD,
+            usd_path=person_usd,
             prim_path=person_path
         )
         
@@ -236,10 +288,11 @@ async def main():
             "position": np.array([pos[0], pos[1], pos[2]]),
             "yaw_deg": yaw_deg,
             "walk_direction": person_config["walk_direction"],
+            "walk_speed": person_config["walk_speed"],
             "distance_walked": 0.0,
         })
         
-        print(f"[PERSON] {person_name} created at ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}), yaw={yaw_deg:.0f}°, label='{PERSON_SEMANTIC_LABEL}'")
+        print(f"[PERSON] {person_name} created at ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}), yaw={yaw_deg:.0f}°, speed={person_config['walk_speed']:.1f}m/s, label='{PERSON_SEMANTIC_LABEL}'")
 
     print(f"{len(people)} person(s) created.")
 
@@ -316,6 +369,22 @@ async def main():
         print(f"[CAMERA] Top-down camera looking at ground with SetLookAt")
     print(f"[CAMERA] Top-down camera initialized at {topdown_cam_path}")
 
+    # カメラ設定後、選択状態をクリアして地面のハイライトを解除
+    try:
+        selection = omni.usd.get_context().get_selection()
+        selection.clear_selected_prim_paths()
+        print("[CAMERA] Selection cleared to prevent ground highlight")
+    except Exception as e:
+        print(f"[WARNING] Could not clear selection: {e}")
+
+    # =================================================
+    # タイムラインを開始（アニメーション再生のため）
+    # =================================================
+    print("Starting timeline for character animations...")
+    timeline = omni.timeline.get_timeline_interface()
+    timeline.play()
+    print("[TIMELINE] Timeline started")
+
     # 動画用フレームリスト
     video_frames = []
 
@@ -373,19 +442,19 @@ async def main():
                 print(f"  {r['id']}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
             print("Initial person positions:")
             for p in people:
-                print(f"  {p['name']}: pos=({p['position'][0]:.2f}, {p['position'][1]:.2f}, {p['position'][2]:.2f}), yaw={p['yaw_deg']:.0f}°")
+                print(f"  {p['name']}: pos=({p['position'][0]:.2f}, {p['position'][1]:.2f}, {p['position'][2]:.2f}), yaw={p['yaw_deg']:.0f}°, speed={p['walk_speed']:.1f}m/s")
             print("Starting kinematic robot and person movement...\n")
             warmup_done = True
             last_capture_time = current_time
 
-        # デバッグ出力（1秒ごと）
-        if current_time - last_debug_time >= 1.0:
+        # デバッグ出力（5秒ごと）
+        if current_time - last_debug_time >= 5.0:
             print(f"\n[DEBUG t={current_time:.1f}s]")
             for r in robots:
                 pos, quat = r["wheeled_robot"].get_world_pose()
                 print(f"  {r['id']}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}), dir={r['direction']}, yaw={r['yaw_deg']:.0f}°")
             for p in people:
-                print(f"  {p['name']}: pos=({p['position'][0]:.2f}, {p['position'][1]:.2f}, {p['position'][2]:.2f}), dir_idx={p['walk_direction']}, walked={p['distance_walked']:.1f}m")
+                print(f"  {p['name']}: pos=({p['position'][0]:.2f}, {p['position'][1]:.2f}, {p['position'][2]:.2f}), dir_idx={p['walk_direction']}, walked={p['distance_walked']:.1f}m, speed={p['walk_speed']:.1f}m/s")
             last_debug_time = current_time
 
         # ロボットのkinematic移動（物理を無視して位置を直接更新）
@@ -395,12 +464,13 @@ async def main():
             current_y = pos[1]
             current_z = pos[2]
             
-            # 折り返し判定
-            if r["direction"] == 1 and current_x >= r["turn_at_x"]:
+            # 折り返し判定（+250で折り返し、-250で折り返し）
+            turn_boundary = abs(r["turn_at_x"])
+            if r["direction"] == 1 and current_x >= turn_boundary:
                 r["direction"] = -1
                 r["yaw_deg"] = 180.0
                 print(f"[TURN] {r['id']} reached x={current_x:.1f}, turning to -x direction")
-            elif r["direction"] == -1 and current_x <= r["turn_at_x"]:
+            elif r["direction"] == -1 and current_x <= -turn_boundary:
                 r["direction"] = 1
                 r["yaw_deg"] = 0.0
                 print(f"[TURN] {r['id']} reached x={current_x:.1f}, turning to +x direction")
@@ -419,26 +489,26 @@ async def main():
 
         # =================================================
         # 人の歩行更新（kinematic移動）
-        # 40m歩く → 左に90度回転 → 繰り返し
+        # 40m歩く → 右に90度回転 → 繰り返し（時計回り）
         # =================================================
         for p in people:
             # 現在の方向ベクトルと目標yaw角度を取得
             direction_vec, target_yaw_deg = get_person_direction_vector(p["walk_direction"])
             
-            # 今フレームの移動距離
-            move_dist = PERSON_WALK_SPEED * dt
+            # 今フレームの移動距離（個別の歩行速度を使用）
+            move_dist = p["walk_speed"] * dt
             p["distance_walked"] += move_dist
             
             # 位置を更新
             p["position"] = p["position"] + direction_vec * move_dist
             p["yaw_deg"] = target_yaw_deg
             
-            # 40m歩いたら左に90度回転（方向インデックスを+1）
+            # 40m歩いたら右に90度回転（方向インデックスを+1、右回り）
             if p["distance_walked"] >= PERSON_WALK_DISTANCE:
                 p["walk_direction"] = (p["walk_direction"] + 1) % 4
                 p["distance_walked"] = 0.0
                 new_direction_vec, new_yaw_deg = get_person_direction_vector(p["walk_direction"])
-                print(f"[PERSON TURN] {p['name']} turned left 90°, new direction index={p['walk_direction']}, yaw={new_yaw_deg:.0f}°")
+                print(f"[PERSON TURN] {p['name']} turned right 90°, new direction index={p['walk_direction']}, yaw={new_yaw_deg:.0f}°")
             
             # プリムの位置と向きを更新
             person_prim = p["prim"]
