@@ -1,5 +1,6 @@
 import os
 import asyncio
+import json
 import numpy as np
 from PIL import Image
 import omni.usd
@@ -8,19 +9,25 @@ import omni.kit.app
 from isaacsim.core.api import World
 from isaacsim.robot.wheeled_robots.robots import WheeledRobot
 from isaacsim.core.utils.rotations import euler_angles_to_quat
+from isaacsim.core.utils.stage import add_reference_to_stage
+from isaacsim.core.utils.semantics import add_update_semantics
 from isaacsim.sensors.camera import Camera
 from isaacsim.storage.native import get_assets_root_path
-from pxr import UsdGeom, Gf
+from pxr import UsdGeom, Gf, Sdf
 import carb
 
 # =====================================================
 # 設定
 # =====================================================
 NUM_ROBOTS = 4
-RUN_TIME = 62.0              # ウォームアップ2秒 + 実行60秒
+RUN_TIME = 122.0              # ウォームアップ2秒 + 実行120秒（人が周回するため長め）
 CAPTURE_INTERVAL = 2.0
 FORWARD_SPEED = 6.0          # m/s (スケールに合わせて調整)
 ANGULAR_SPEED = 0.0          # rad/s（直進のみ）
+
+# 人の歩行設定
+PERSON_WALK_SPEED = 1.4      # m/s (通常の歩行速度)
+PERSON_WALK_DISTANCE = 40.0  # 各辺の歩行距離
 
 # JetBot スケーリング設定
 # 元のJetBot横幅は約0.125m、2.5mにするためスケール20倍
@@ -37,8 +44,22 @@ ROBOT_CONFIGS = [
     {"position": (250.0, 3.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -250.0, "direction": -1},  # 4台目: -X方向へ
 ]
 
+# 人の初期配置設定
+PERSON_CONFIGS = [
+    {
+        "name": "Person_00",
+        "position": (-20.0, 20.0, 0.0),  # 初期位置 (x, y, z) - zは地面に接する
+        "yaw_deg": -90.0,  # -Y方向を向く (南向き)
+        "walk_direction": 0,  # 0: -Y方向, 1: -X方向, 2: +Y方向, 3: +X方向
+        "distance_walked": 0.0,  # 現在の辺での歩行距離
+    },
+]
+
 BASE_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed/robot_images"
 VIDEO_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed"
+
+# 人のセマンティックラベル（統一ラベル）
+PERSON_SEMANTIC_LABEL = "person"
 
 # JetBot USDパス
 assets_root_path = get_assets_root_path()
@@ -47,6 +68,22 @@ if assets_root_path is None:
     raise RuntimeError("Assets root path not found")
 JETBOT_USD = assets_root_path + "/Isaac/Robots/NVIDIA/Jetbot/jetbot.usd"
 print(f"JetBot USD path: {JETBOT_USD}")
+
+# 人のUSDパス (Isaac/People/Charactersから一つ選択)
+PERSON_USD = assets_root_path + "/Isaac/People/Characters/F_Business_02/F_Business_02.usd"
+print(f"Person USD path: {PERSON_USD}")
+
+
+def get_person_direction_vector(direction_index):
+    """歩行方向インデックスから方向ベクトルと向きを返す"""
+    # 0: -Y方向, 1: -X方向, 2: +Y方向, 3: +X方向
+    directions = [
+        (np.array([0.0, -1.0, 0.0]), -90.0),   # -Y方向、yaw=-90度
+        (np.array([-1.0, 0.0, 0.0]), 180.0),   # -X方向、yaw=180度
+        (np.array([0.0, 1.0, 0.0]), 90.0),     # +Y方向、yaw=90度
+        (np.array([1.0, 0.0, 0.0]), 0.0),      # +X方向、yaw=0度
+    ]
+    return directions[direction_index % 4]
 
 
 async def main():
@@ -145,6 +182,68 @@ async def main():
     print(f"\n{NUM_ROBOTS} robots created and scaled.")
 
     # =================================================
+    # 人のキャラクターを追加
+    # =================================================
+    print("Creating person characters...")
+    people = []
+    
+    for i, person_config in enumerate(PERSON_CONFIGS):
+        person_name = person_config["name"]
+        person_path = f"/World/{person_name}"
+        
+        # 既存のプリムを削除
+        existing_person = stage.GetPrimAtPath(person_path)
+        if existing_person and existing_person.IsValid():
+            stage.RemovePrim(person_path)
+        
+        # 人のキャラクターを追加
+        person_prim = add_reference_to_stage(
+            usd_path=PERSON_USD,
+            prim_path=person_path
+        )
+        
+        # 位置と向きを設定
+        pos = person_config["position"]
+        yaw_deg = person_config["yaw_deg"]
+        
+        xformable = UsdGeom.Xformable(person_prim)
+        
+        # トランスレーション設定
+        translate_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeTranslate]
+        if translate_ops:
+            translate_ops[0].Set(Gf.Vec3d(pos[0], pos[1], pos[2]))
+        else:
+            xformable.AddTranslateOp().Set(Gf.Vec3d(pos[0], pos[1], pos[2]))
+        
+        # 回転設定 (Y軸周りの回転 = yaw)
+        orient_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeOrient]
+        yaw_rad = np.deg2rad(yaw_deg)
+        # クォータニオン変換 (Z軸周りの回転)
+        quat = euler_angles_to_quat(np.array([0, 0, yaw_rad]))
+        if orient_ops:
+            orient_ops[0].Set(Gf.Quatf(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])))
+        else:
+            xformable.AddOrientOp().Set(Gf.Quatf(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])))
+        
+        # セマンティックラベルを追加（統一ラベル "person"）
+        add_update_semantics(person_prim, PERSON_SEMANTIC_LABEL, "class")
+        
+        # 歩行状態を管理するデータ構造
+        people.append({
+            "name": person_name,
+            "path": person_path,
+            "prim": person_prim,
+            "position": np.array([pos[0], pos[1], pos[2]]),
+            "yaw_deg": yaw_deg,
+            "walk_direction": person_config["walk_direction"],
+            "distance_walked": 0.0,
+        })
+        
+        print(f"[PERSON] {person_name} created at ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}), yaw={yaw_deg:.0f}°, label='{PERSON_SEMANTIC_LABEL}'")
+
+    print(f"{len(people)} person(s) created.")
+
+    # =================================================
     # 上空カメラ（ワールド中央上部から見下ろす）
     # =================================================
     print("Creating top-down camera at (0, 0, 300)...")
@@ -164,7 +263,7 @@ async def main():
     # =================================================
     # Camera初期化（world.reset()の後）
     # =================================================
-    print("Initializing robot cameras...")
+    print("Initializing robot cameras with bounding box detection...")
     for r in robots:
         cam_path = f"{r['path']}/chassis/fed_camera"
         cam = Camera(
@@ -174,8 +273,13 @@ async def main():
             translation=np.array([0.15, 0.0, 0.1]),
         )
         cam.initialize()
+        
+        # Bounding Box 2D Tightアノテーターを追加
+        # semanticTypes=["class"]で"class"タイプのセマンティックラベルを持つオブジェクトを検出
+        cam.add_bounding_box_2d_tight_to_frame(init_params={"semanticTypes": ["class"]})
+        
         r["camera"] = cam
-        print(f"[CAMERA] {r['id']} initialized at {cam_path}")
+        print(f"[CAMERA] {r['id']} initialized at {cam_path} with bounding_box_2d_tight")
 
     # =================================================
     # 上空カメラ初期化
@@ -267,7 +371,10 @@ async def main():
             for r in robots:
                 pos, quat = r["wheeled_robot"].get_world_pose()
                 print(f"  {r['id']}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
-            print("Starting kinematic robot movement...\n")
+            print("Initial person positions:")
+            for p in people:
+                print(f"  {p['name']}: pos=({p['position'][0]:.2f}, {p['position'][1]:.2f}, {p['position'][2]:.2f}), yaw={p['yaw_deg']:.0f}°")
+            print("Starting kinematic robot and person movement...\n")
             warmup_done = True
             last_capture_time = current_time
 
@@ -277,6 +384,8 @@ async def main():
             for r in robots:
                 pos, quat = r["wheeled_robot"].get_world_pose()
                 print(f"  {r['id']}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}), dir={r['direction']}, yaw={r['yaw_deg']:.0f}°")
+            for p in people:
+                print(f"  {p['name']}: pos=({p['position'][0]:.2f}, {p['position'][1]:.2f}, {p['position'][2]:.2f}), dir_idx={p['walk_direction']}, walked={p['distance_walked']:.1f}m")
             last_debug_time = current_time
 
         # ロボットのkinematic移動（物理を無視して位置を直接更新）
@@ -308,6 +417,45 @@ async def main():
             # 位置と向きを直接設定（kinematic移動）
             r["wheeled_robot"].set_world_pose(position=new_position, orientation=target_orientation)
 
+        # =================================================
+        # 人の歩行更新（kinematic移動）
+        # 40m歩く → 左に90度回転 → 繰り返し
+        # =================================================
+        for p in people:
+            # 現在の方向ベクトルと目標yaw角度を取得
+            direction_vec, target_yaw_deg = get_person_direction_vector(p["walk_direction"])
+            
+            # 今フレームの移動距離
+            move_dist = PERSON_WALK_SPEED * dt
+            p["distance_walked"] += move_dist
+            
+            # 位置を更新
+            p["position"] = p["position"] + direction_vec * move_dist
+            p["yaw_deg"] = target_yaw_deg
+            
+            # 40m歩いたら左に90度回転（方向インデックスを+1）
+            if p["distance_walked"] >= PERSON_WALK_DISTANCE:
+                p["walk_direction"] = (p["walk_direction"] + 1) % 4
+                p["distance_walked"] = 0.0
+                new_direction_vec, new_yaw_deg = get_person_direction_vector(p["walk_direction"])
+                print(f"[PERSON TURN] {p['name']} turned left 90°, new direction index={p['walk_direction']}, yaw={new_yaw_deg:.0f}°")
+            
+            # プリムの位置と向きを更新
+            person_prim = p["prim"]
+            xformable = UsdGeom.Xformable(person_prim)
+            
+            # トランスレーション更新
+            translate_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeTranslate]
+            if translate_ops:
+                translate_ops[0].Set(Gf.Vec3d(float(p["position"][0]), float(p["position"][1]), float(p["position"][2])))
+            
+            # 向き更新
+            yaw_rad = np.deg2rad(p["yaw_deg"])
+            quat = euler_angles_to_quat(np.array([0, 0, yaw_rad]))
+            orient_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeOrient]
+            if orient_ops:
+                orient_ops[0].Set(Gf.Quatf(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])))
+
         # 上空カメラからフレームをキャプチャ（毎フレーム）
         topdown_rgba = topdown_camera.get_rgba()
         if topdown_rgba is not None and topdown_rgba.size > 0:
@@ -316,7 +464,7 @@ async def main():
             topdown_img = topdown_rgba[:, :, :3].astype(np.uint8)
             video_frames.append(topdown_img)
 
-        # ロボットカメラからの画像キャプチャ
+        # ロボットカメラからの画像キャプチャ（RGBとBounding Box）
         if current_time - last_capture_time >= CAPTURE_INTERVAL:
             for r in robots:
                 cam = r["camera"]
@@ -331,17 +479,65 @@ async def main():
                 rgba = rgba.reshape(h, w, 4)
                 img = rgba[:, :, :3].astype(np.uint8)
 
-                filepath = os.path.join(
+                # RGB画像の保存パス
+                rgb_filepath = os.path.join(
                     r["save_dir"],
                     f"frame_{r['frame']:04d}.png"
+                )
+                
+                # Bounding Boxデータの保存パス（同じフォルダに保存）
+                bbox_filepath = os.path.join(
+                    r["save_dir"],
+                    f"frame_{r['frame']:04d}_bbox.json"
                 )
 
                 # 現在位置と回転を取得
                 pos, quat = r["wheeled_robot"].get_world_pose()
 
-                print(f"[SAVED] {r['id']} frame_{r['frame']:04d} at ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}), dir={r['direction']}, yaw={r['yaw_deg']:.0f}°")
+                # RGB画像を保存
+                Image.fromarray(img).save(rgb_filepath)
+                
+                # Bounding Box 2D Tightデータを取得して保存
+                try:
+                    current_frame = cam.get_current_frame()
+                    bbox_data = current_frame.get("bounding_box_2d_tight", {})
+                    
+                    # バウンディングボックスデータを整形
+                    bbox_list = []
+                    if bbox_data and "data" in bbox_data:
+                        for bbox in bbox_data["data"]:
+                            bbox_entry = {
+                                "semanticId": int(bbox["semanticId"]),
+                                "x_min": int(bbox["x_min"]),
+                                "y_min": int(bbox["y_min"]),
+                                "x_max": int(bbox["x_max"]),
+                                "y_max": int(bbox["y_max"]),
+                                "occlusionRatio": float(bbox["occlusionRatio"]),
+                                "label": PERSON_SEMANTIC_LABEL,  # 統一ラベル
+                            }
+                            bbox_list.append(bbox_entry)
+                    
+                    # idToLabels情報も取得（セマンティックID→ラベルのマッピング）
+                    id_to_labels = bbox_data.get("info", {}).get("idToLabels", {})
+                    
+                    bbox_result = {
+                        "frame_id": r["frame"],
+                        "robot_id": r["id"],
+                        "robot_position": {"x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2])},
+                        "timestamp": float(current_time),
+                        "image_resolution": {"width": w, "height": h},
+                        "bounding_boxes": bbox_list,
+                        "id_to_labels": {str(k): v for k, v in id_to_labels.items()},
+                    }
+                    
+                    with open(bbox_filepath, 'w') as f:
+                        json.dump(bbox_result, f, indent=2)
+                    
+                    print(f"[SAVED] {r['id']} frame_{r['frame']:04d} at ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}), bboxes={len(bbox_list)}")
+                except Exception as e:
+                    print(f"[WARNING] Failed to get bounding box data for {r['id']}: {e}")
+                    print(f"[SAVED] {r['id']} frame_{r['frame']:04d} at ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}) (RGB only)")
 
-                Image.fromarray(img).save(filepath)
                 r["frame"] += 1
 
             last_capture_time = current_time
