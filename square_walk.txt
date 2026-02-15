@@ -1,0 +1,23 @@
+Character GoTo -20 20 0 _
+Character GoTo 20 20 0 _
+Character GoTo 20 -20 0 _
+Character GoTo -20 -20 0 _
+Character GoTo -20 20 0 _
+
+Character_01 GoTo -20 -20 0 _
+Character_01 GoTo -20 20 0 _
+Character_01 GoTo 20 20 0 _
+Character_01 GoTo 20 -20 0 _
+Character_01 GoTo -20 -20 0 _
+
+Character_02 GoTo 20 -20 0 _
+Character_02 GoTo -20 -20 0 _
+Character_02 GoTo -20 20 0 _
+Character_02 GoTo 20 20 0 _
+Character_02 GoTo 20 -20 0 _
+
+Character_03 GoTo 20 20 0 _
+Character_03 GoTo 20 -20 0 _
+Character_03 GoTo -20 -20 0 _
+Character_03 GoTo -20 20 0 _
+Character_03 GoTo 20 20 0 _
