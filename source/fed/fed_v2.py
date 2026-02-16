@@ -15,23 +15,8 @@ from isaacsim.core.utils.semantics import add_update_semantics
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.sensors.camera import Camera
 from isaacsim.storage.native import get_assets_root_path
-from pxr import UsdGeom, Gf, Sdf, UsdSkel
+from pxr import UsdGeom, Gf, Sdf, UsdSkel, Usd, UsdPhysics
 import carb
-
-# アニメーション関連の拡張機能を有効化
-ANIM_EXTENSIONS = [
-    "omni.anim.people",
-    "omni.anim.timeline",
-    "omni.anim.graph.bundle",
-    "omni.anim.graph.core",
-]
-print("Enabling animation extensions...")
-for ext in ANIM_EXTENSIONS:
-    try:
-        enable_extension(ext)
-        print(f"  [OK] {ext}")
-    except Exception as e:
-        print(f"  [SKIP] {ext}: {e}")
 
 # =====================================================
 # 設定
@@ -41,9 +26,6 @@ RUN_TIME = 50.0              # ウォームアップ2秒 + 実行（人が周回
 CAPTURE_INTERVAL = 2.0
 FORWARD_SPEED = 10.0          # m/s (スケールに合わせて調整)
 ANGULAR_SPEED = 0.0          # rad/s（直進のみ）
-
-# 人の歩行設定
-PERSON_WALK_DISTANCE = 40.0  # 各辺の歩行距離
 
 # JetBot スケーリング設定
 # 元のJetBot横幅は約0.125m、2.5mにするためスケール20倍
@@ -60,49 +42,11 @@ ROBOT_CONFIGS = [
     {"position": (50.0, 3.0, 0.0), "yaw_deg": 180.0, "turn_at_x": -50.0, "direction": -1},  # 4台目: -X方向へ
 ]
 
-# 人の初期配置設定（4人）
-# 全員同じルートを周回：(-20,20) → (-20,-20) → (20,-20) → (20,20) → (-20,20)...
-# 初期位置と初期方向を設定して、同じ40m四角形を右回りに周回
-PERSON_CONFIGS = [
-    {
-        "name": "Person_00",
-        "position": (-20.0, 20.0, 0.0),
-        "yaw_deg": -90.0,      # -Y方向を向く (南向き)
-        "walk_direction": 0,   # 0: -Y方向から開始
-        "walk_speed": 2.2,     # m/s
-        "distance_walked": 0.0,
-    },
-    {
-        "name": "Person_01",
-        "position": (-20.0, -20.0, 0.0),
-        "yaw_deg": 0.0,        # +X方向を向く (東向き)
-        "walk_direction": 1,   # 1: +X方向から開始
-        "walk_speed": 2.4,     # m/s
-        "distance_walked": 0.0,
-    },
-    {
-        "name": "Person_02",
-        "position": (20.0, 20.0, 0.0),
-        "yaw_deg": 180.0,      # -X方向を向く (西向き)
-        "walk_direction": 3,   # 3: -X方向から開始
-        "walk_speed": 2.0,     # m/s
-        "distance_walked": 0.0,
-    },
-    {
-        "name": "Person_03",
-        "position": (20.0, -20.0, 0.0),
-        "yaw_deg": 90.0,       # +Y方向を向く (北向き)
-        "walk_direction": 2,   # 2: +Y方向から開始
-        "walk_speed": 2.6,     # m/s
-        "distance_walked": 0.0,
-    },
-]
-
 BASE_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed/robot_images"
 VIDEO_SAVE_DIR = "/home/tamakiokamoto/so/isaac-fed/source/fed"
 
-# 人のセマンティックラベル（統一ラベル）
-PERSON_SEMANTIC_LABEL = "person"
+# 人のセマンティックラベル（バウンディングボックス用）
+PERSON_SEMANTIC_LABEL = "Human"
 
 # JetBot USDパス
 assets_root_path = get_assets_root_path()
@@ -111,30 +55,6 @@ if assets_root_path is None:
     raise RuntimeError("Assets root path not found")
 JETBOT_USD = assets_root_path + "/Isaac/Robots/NVIDIA/Jetbot/jetbot.usd"
 print(f"JetBot USD path: {JETBOT_USD}")
-
-# 人のUSDパス (Isaac/People/Charactersから4種類)
-PERSON_USDS = [
-    assets_root_path + "/Isaac/People/Characters/F_Business_02/F_Business_02.usd",
-    assets_root_path + "/Isaac/People/Characters/F_Business_02/F_Business_02.usd",
-    assets_root_path + "/Isaac/People/Characters/M_Medical_01/M_Medical_01.usd",
-    assets_root_path + "/Isaac/People/Characters/F_Medical_01/F_Medical_01.usd",
-]
-for i, usd_path in enumerate(PERSON_USDS):
-    print(f"Person_{i:02d} USD path: {usd_path}")
-
-
-def get_person_direction_vector(direction_index):
-    """歩行方向インデックスから方向ベクトルと向きを返す
-    右回り（時計回り）の順序: -Y → +X → +Y → -X → -Y...
-    """
-    # 0: -Y方向, 1: +X方向, 2: +Y方向, 3: -X方向 (右回り)
-    directions = [
-        (np.array([0.0, -1.0, 0.0]), -90.0),   # -Y方向、yaw=-90度
-        (np.array([1.0, 0.0, 0.0]), 0.0),      # +X方向、yaw=0度
-        (np.array([0.0, 1.0, 0.0]), 90.0),     # +Y方向、yaw=90度
-        (np.array([-1.0, 0.0, 0.0]), 180.0),   # -X方向、yaw=180度
-    ]
-    return directions[direction_index % 4]
 
 
 async def main():
@@ -159,7 +79,14 @@ async def main():
     World.clear_instance()
     world = World(stage_units_in_meters=1.0)
     await world.initialize_simulation_context_async()
-    world.scene.add_default_ground_plane()
+    
+    # Z座標はスケールを考慮して設定（車輪が地面に接する高さ）
+    # 車輪半径 * スケール = 地面からボディ中心までの高さ
+    wheel_radius_scaled = 0.03 * SCALE_FACTOR
+    ground_z = wheel_radius_scaled
+    print(f"[KINEMATIC] Robot Z position fixed at {ground_z:.2f}m (wheel radius scaled)")
+    
+    stage = omni.usd.get_context().get_stage()
 
     # =================================================
     # ロボット作成（WheeledRobot + create_robot=True）
@@ -172,12 +99,9 @@ async def main():
         robot_path = f"/World/JetBot_{i:02d}"
         config = ROBOT_CONFIGS[i]
 
-        # 位置設定
-        # JetBotの車輪半径は約0.03m、スケール後は 0.03 * SCALEになる
-        # 車輪が地面に接するように設定（z_offset = scaled wheel radius）
+        # 位置設定（Z=0固定）
         pos = config["position"]
-        z_offset = 0.03 * SCALE_FACTOR  # 車輪半径分だけ浮かせる（地面接地）
-        position = np.array([pos[0], pos[1], pos[2] + z_offset])
+        position = np.array([pos[0], pos[1], ground_z])
         
         # 回転設定: yaw（Z軸回転）のみ
         # JetBotが地面と平行になるように roll=0, pitch=0 に固定
@@ -206,9 +130,11 @@ async def main():
             "camera": None,
             "save_dir": save_dir,
             "frame": 0,
+            "config_idx": i,  # 設定インデックス（再配置用）
             "direction": config["direction"],  # 1 = 正方向(+x)、-1 = 逆方向(-x)
             "turn_at_x": config["turn_at_x"],  # 折り返しX座標
             "yaw_deg": config["yaw_deg"],  # 現在のyaw角度
+            "target_z": ground_z,  # 目標Z座標（常に0）
         })
         
         print(f"[CREATED] {robot_id} at ({position[0]:.1f}, {position[1]:.1f}, {position[2]:.1f}), yaw={config['yaw_deg']:.0f}°")
@@ -217,7 +143,6 @@ async def main():
     # ロボットにスケール適用
     # =================================================
     print("Applying scale to robots...")
-    stage = omni.usd.get_context().get_stage()
     for r in robots:
         prim = stage.GetPrimAtPath(r["path"])
         if prim and prim.IsValid():
@@ -230,71 +155,7 @@ async def main():
                 xformable.AddScaleOp().Set(Gf.Vec3f(SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR))
             print(f"[SCALE] {r['id']} scaled by {SCALE_FACTOR}x")
 
-    print(f"\n{NUM_ROBOTS} robots created and scaled.")
-
-    # =================================================
-    # 人のキャラクターを追加
-    # =================================================
-    print("Creating person characters...")
-    people = []
-    
-    for i, person_config in enumerate(PERSON_CONFIGS):
-        person_name = person_config["name"]
-        person_path = f"/World/{person_name}"
-        
-        # 既存のプリムを削除
-        existing_person = stage.GetPrimAtPath(person_path)
-        if existing_person and existing_person.IsValid():
-            stage.RemovePrim(person_path)
-        
-        # 人のキャラクターを追加（各人に異なるUSDを使用）
-        person_usd = PERSON_USDS[i % len(PERSON_USDS)]
-        person_prim = add_reference_to_stage(
-            usd_path=person_usd,
-            prim_path=person_path
-        )
-        
-        # 位置と向きを設定
-        pos = person_config["position"]
-        yaw_deg = person_config["yaw_deg"]
-        
-        xformable = UsdGeom.Xformable(person_prim)
-        
-        # トランスレーション設定
-        translate_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeTranslate]
-        if translate_ops:
-            translate_ops[0].Set(Gf.Vec3d(pos[0], pos[1], pos[2]))
-        else:
-            xformable.AddTranslateOp().Set(Gf.Vec3d(pos[0], pos[1], pos[2]))
-        
-        # 回転設定 (Y軸周りの回転 = yaw)
-        orient_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeOrient]
-        yaw_rad = np.deg2rad(yaw_deg)
-        # クォータニオン変換 (Z軸周りの回転)
-        quat = euler_angles_to_quat(np.array([0, 0, yaw_rad]))
-        if orient_ops:
-            orient_ops[0].Set(Gf.Quatf(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])))
-        else:
-            xformable.AddOrientOp().Set(Gf.Quatf(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])))
-        
-        # セマンティックラベルを追加（統一ラベル "person"）
-        add_update_semantics(person_prim, PERSON_SEMANTIC_LABEL, "class")
-        
-        # 歩行状態を管理するデータ構造
-        people.append({
-            "name": person_name,
-            "path": person_path,
-            "prim": person_prim,
-            "position": np.array([pos[0], pos[1], pos[2]]),
-            "yaw_deg": yaw_deg,
-            "walk_direction": person_config["walk_direction"],
-            "walk_speed": person_config["walk_speed"],
-            "distance_walked": 0.0,
-        })
-        
-        print(f"[PERSON] {person_name} created at ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}), yaw={yaw_deg:.0f}°, speed={person_config['walk_speed']:.1f}m/s, label='{PERSON_SEMANTIC_LABEL}'")
-
-    print(f"{len(people)} person(s) created.")
+    print(f"\n{NUM_ROBOTS} robots scaled.")
 
     # =================================================
     # 上空カメラ（ワールド中央上部から見下ろす）
@@ -312,6 +173,27 @@ async def main():
     print("Resetting world...")
     await world.reset_async()
     print("World reset complete.")
+    
+    # =================================================
+    # world.reset後にロボットの位置を再設定
+    # =================================================
+    print("Repositioning robots after world reset...")
+    for r in robots:
+        config = ROBOT_CONFIGS[r["config_idx"]]
+        pos = config["position"]
+        position = np.array([pos[0], pos[1], ground_z])
+        yaw_rad = np.deg2rad(config["yaw_deg"])
+        orientation = euler_angles_to_quat(np.array([0, 0, yaw_rad]))
+        
+        # WheeledRobotの位置を再設定
+        r["wheeled_robot"].set_world_pose(position=position, orientation=orientation)
+        
+        # ホイールジョイントを初期化（0度）
+        wr = r["wheeled_robot"]
+        if wr.num_dof >= 2:
+            wr.set_joint_positions(np.array([0.0, 0.0]))
+        
+        print(f"[REPOSITION] {r['id']} at ({position[0]:.1f}, {position[1]:.1f}, {position[2]:.1f}), yaw={config['yaw_deg']:.0f}°")
 
     # =================================================
     # Camera初期化（world.reset()の後）
@@ -377,14 +259,6 @@ async def main():
     except Exception as e:
         print(f"[WARNING] Could not clear selection: {e}")
 
-    # =================================================
-    # タイムラインを開始（アニメーション再生のため）
-    # =================================================
-    print("Starting timeline for character animations...")
-    timeline = omni.timeline.get_timeline_interface()
-    timeline.play()
-    print("[TIMELINE] Timeline started")
-
     # 動画用フレームリスト
     video_frames = []
 
@@ -440,10 +314,7 @@ async def main():
             for r in robots:
                 pos, quat = r["wheeled_robot"].get_world_pose()
                 print(f"  {r['id']}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
-            print("Initial person positions:")
-            for p in people:
-                print(f"  {p['name']}: pos=({p['position'][0]:.2f}, {p['position'][1]:.2f}, {p['position'][2]:.2f}), yaw={p['yaw_deg']:.0f}°, speed={p['walk_speed']:.1f}m/s")
-            print("Starting kinematic robot and person movement...\n")
+            print("Starting kinematic robot movement...\n")
             warmup_done = True
             last_capture_time = current_time
 
@@ -453,16 +324,15 @@ async def main():
             for r in robots:
                 pos, quat = r["wheeled_robot"].get_world_pose()
                 print(f"  {r['id']}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}), dir={r['direction']}, yaw={r['yaw_deg']:.0f}°")
-            for p in people:
-                print(f"  {p['name']}: pos=({p['position'][0]:.2f}, {p['position'][1]:.2f}, {p['position'][2]:.2f}), dir_idx={p['walk_direction']}, walked={p['distance_walked']:.1f}m, speed={p['walk_speed']:.1f}m/s")
             last_debug_time = current_time
 
-        # ロボットのkinematic移動（物理を無視して位置を直接更新）
+        # ロボットのkinematic移動（位置を直接更新して物理を上書き）
         for r in robots:
-            pos, _ = r["wheeled_robot"].get_world_pose()
+            pos, ori = r["wheeled_robot"].get_world_pose()
             current_x = pos[0]
             current_y = pos[1]
-            current_z = pos[2]
+            # Z座標は常に目標値に強制設定（重力無視）
+            current_z = r["target_z"]
             
             # 折り返し判定（+250で折り返し、-250で折り返し）
             turn_boundary = abs(r["turn_at_x"])
@@ -484,47 +354,30 @@ async def main():
             target_yaw_rad = np.deg2rad(r["yaw_deg"])
             target_orientation = euler_angles_to_quat(np.array([0, 0, target_yaw_rad]))
             
-            # 位置と向きを直接設定（kinematic移動）
+            # 位置と向きを強制設定（物理を上書き）
             r["wheeled_robot"].set_world_pose(position=new_position, orientation=target_orientation)
-
-        # =================================================
-        # 人の歩行更新（kinematic移動）
-        # 40m歩く → 右に90度回転 → 繰り返し（時計回り）
-        # =================================================
-        for p in people:
-            # 現在の方向ベクトルと目標yaw角度を取得
-            direction_vec, target_yaw_deg = get_person_direction_vector(p["walk_direction"])
             
-            # 今フレームの移動距離（個別の歩行速度を使用）
-            move_dist = p["walk_speed"] * dt
-            p["distance_walked"] += move_dist
+            # 物理速度をゼロに設定（落下防止）
+            r["wheeled_robot"].set_linear_velocity(np.array([0.0, 0.0, 0.0]))
+            r["wheeled_robot"].set_angular_velocity(np.array([0.0, 0.0, 0.0]))
             
-            # 位置を更新
-            p["position"] = p["position"] + direction_vec * move_dist
-            p["yaw_deg"] = target_yaw_deg
-            
-            # 40m歩いたら右に90度回転（方向インデックスを+1、右回り）
-            if p["distance_walked"] >= PERSON_WALK_DISTANCE:
-                p["walk_direction"] = (p["walk_direction"] + 1) % 4
-                p["distance_walked"] = 0.0
-                new_direction_vec, new_yaw_deg = get_person_direction_vector(p["walk_direction"])
-                print(f"[PERSON TURN] {p['name']} turned right 90°, new direction index={p['walk_direction']}, yaw={new_yaw_deg:.0f}°")
-            
-            # プリムの位置と向きを更新
-            person_prim = p["prim"]
-            xformable = UsdGeom.Xformable(person_prim)
-            
-            # トランスレーション更新
-            translate_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeTranslate]
-            if translate_ops:
-                translate_ops[0].Set(Gf.Vec3d(float(p["position"][0]), float(p["position"][1]), float(p["position"][2])))
-            
-            # 向き更新
-            yaw_rad = np.deg2rad(p["yaw_deg"])
-            quat = euler_angles_to_quat(np.array([0, 0, yaw_rad]))
-            orient_ops = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == UsdGeom.XformOp.TypeOrient]
-            if orient_ops:
-                orient_ops[0].Set(Gf.Quatf(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])))
+            # タイヤを回転させる（視覚効果のため）
+            # 移動速度に応じてホイールの角速度を計算
+            wheel_radius = 0.03 * SCALE_FACTOR  # スケール後の車輪半径
+            wheel_angular_velocity = move_distance / wheel_radius  # rad/frame
+            # 両方のホイールを同じ速度で回転
+            wr = r["wheeled_robot"]
+            if wr.num_dof >= 2:
+                current_joint_positions = wr.get_joint_positions()
+                if current_joint_positions is not None and len(current_joint_positions) >= 2:
+                    new_joint_positions = current_joint_positions.copy()
+                    # 左右のホイールを回転（正の方向に進む場合は正の回転）
+                    new_joint_positions[0] += wheel_angular_velocity  # left wheel
+                    new_joint_positions[1] += wheel_angular_velocity  # right wheel
+                    # 角度を[-2π, 2π]の範囲に正規化（PhysXエラー回避）
+                    new_joint_positions[0] = np.fmod(new_joint_positions[0], 2 * np.pi)
+                    new_joint_positions[1] = np.fmod(new_joint_positions[1], 2 * np.pi)
+                    wr.set_joint_positions(new_joint_positions)
 
         # 上空カメラからフレームをキャプチャ（毎フレーム）
         topdown_rgba = topdown_camera.get_rgba()
@@ -583,7 +436,7 @@ async def main():
                                 "x_max": int(bbox["x_max"]),
                                 "y_max": int(bbox["y_max"]),
                                 "occlusionRatio": float(bbox["occlusionRatio"]),
-                                "label": PERSON_SEMANTIC_LABEL,  # 統一ラベル
+                                "label": PERSON_SEMANTIC_LABEL,  # すべて"Human"ラベル
                             }
                             bbox_list.append(bbox_entry)
                     
@@ -618,64 +471,30 @@ async def main():
             break
 
     # =================================================
-    # 動画を保存
+    # 動画を保存（MP4のみ）
     # =================================================
     print(f"Saving video ({len(video_frames)} frames)...")
     if video_frames:
         os.makedirs(VIDEO_SAVE_DIR, exist_ok=True)
-        video_saved = False
         
-        # 方法1: OpenCV (cv2) でMP4形式を試す (H.264コーデック)
+        # OpenCV (cv2) でMP4形式で保存
         try:
             import cv2
             video_path = os.path.join(VIDEO_SAVE_DIR, "simulation_topdown.mp4")
             h, w = video_frames[0].shape[:2]
-            # avc1またはH264コーデックを試す
-            for codec in ['avc1', 'H264', 'mp4v', 'XVID']:
-                fourcc = cv2.VideoWriter_fourcc(*codec)
-                ext = '.mp4' if codec in ['avc1', 'H264', 'mp4v'] else '.avi'
-                video_path = os.path.join(VIDEO_SAVE_DIR, f"simulation_topdown{ext}")
-                out = cv2.VideoWriter(video_path, fourcc, 30.0, (w, h))
-                if out.isOpened():
-                    for frame in video_frames:
-                        out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                    out.release()
-                    print(f"[VIDEO] Saved to {video_path} (using OpenCV {codec})")
-                    video_saved = True
-                    break
-                else:
-                    print(f"Codec {codec} not available, trying next...")
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(video_path, fourcc, 30.0, (w, h))
+            if out.isOpened():
+                for frame in video_frames:
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                out.release()
+                print(f"[VIDEO] Saved to {video_path}")
+            else:
+                print("[ERROR] Failed to open video writer")
         except ImportError:
-            print("OpenCV not available...")
+            print("[ERROR] OpenCV not available")
         except Exception as e:
-            print(f"OpenCV failed: {e}")
-        
-        # 方法2: GIFとして保存（PILで可能）
-        if not video_saved:
-            try:
-                video_path = os.path.join(VIDEO_SAVE_DIR, "simulation_topdown.gif")
-                pil_frames = [Image.fromarray(f) for f in video_frames[::3]]  # 3フレームごと（GIFサイズ削減）
-                pil_frames[0].save(
-                    video_path,
-                    save_all=True,
-                    append_images=pil_frames[1:],
-                    duration=100,  # 100ms per frame
-                    loop=0
-                )
-                print(f"[VIDEO] Saved to {video_path} (as GIF, every 3rd frame)")
-                video_saved = True
-            except Exception as e:
-                print(f"GIF save failed: {e}")
-        
-        # 方法3: PNGシーケンスとして保存
-        if not video_saved:
-            print("Saving frames as PNG sequence...")
-            video_frames_dir = os.path.join(VIDEO_SAVE_DIR, "topdown_frames")
-            os.makedirs(video_frames_dir, exist_ok=True)
-            for i, frame in enumerate(video_frames):
-                Image.fromarray(frame).save(os.path.join(video_frames_dir, f"frame_{i:04d}.png"))
-            print(f"[FRAMES] Saved {len(video_frames)} frames to {video_frames_dir}")
-            print("To convert to video: ffmpeg -framerate 30 -i frame_%04d.png -c:v libx264 -pix_fmt yuv420p output.mp4")
+            print(f"[ERROR] Video save failed: {e}")
 
     print("SCRIPT END")
     world.stop()
